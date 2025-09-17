@@ -23,7 +23,8 @@
     "electron-builder": "^24.6.4"
   },
   "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0"
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "iconv-lite": "^0.6.3"
   },
   "build": {
     "appId": "com.gifcapture.app",

@@ -1,47 +1,235 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+// 确保日志在 Windows 上不会出现 GBK/ANSI 的乱码
+const iconv = require('iconv-lite');
+
+// 尝试将 Buffer 解码为 UTF-8，若包含非 UTF-8 字节（如 GBK/CP936）则使用 GBK 解码后返回 UTF-8 字符串
+function decodeBuffer(buf) {
+  // 在 Windows 上 FFmpeg 等外部程序经常使用 GBK/CP936 输出，直接用 gbk 解码更稳妥
+  if (process.platform === 'win32') {
+    try {
+      return iconv.decode(buf, 'gbk');
+    } catch (e) {
+      return buf.toString('utf8');
+    }
+  }
+
+  // 非 Windows 平台仍优先尝试 UTF-8，若含替换字符则回退到 GBK
+  try {
+    const utf8 = buf.toString('utf8');
+    if (utf8.includes('\uFFFD')) {
+      return iconv.decode(buf, 'gbk');
+    }
+    return utf8;
+  } catch (e) {
+    try {
+      return iconv.decode(buf, 'gbk');
+    } catch (e2) {
+      return buf.toString();
+    }
+  }
+}
+
+// 可选：将日志写入 UTF-8 文件以避免控制台编码导致的显示问题
+const LOG_TO_FILE = (process.env.LOG_TO_FILE === '1' || process.env.LOG_TO_FILE === 'true');
+const logFilePath = path.join(os.homedir(), 'gif-capture.log');
+// 保留原始 console 方法（备用）
+const _origConsoleLog = console.log.bind(console);
+const _origConsoleError = console.error.bind(console);
+
+function writeLogToFile(line) {
+  if (!LOG_TO_FILE) return;
+  try {
+    // 确保以 UTF-8 写入
+    fs.appendFileSync(logFilePath, line + '\n', { encoding: 'utf8' });
+  } catch (e) {
+    // 如果文件写入失败，退回到原始错误输出（这可能再次乱码，但会显示错误）
+    _origConsoleError('写入日志文件失败:', e.message || e);
+  }
+}
+
+// 控制台输出编码：在 Windows 上默认将 UTF-8 字符串编码为 GBK 再写入 stdout/stderr，
+// 以便在未切换到 UTF-8 代码页的 cmd/PowerShell 中正确显示中文。
+// 可通过环境变量 `CONSOLE_ENCODING=utf8` 强制输出 UTF-8（例如在 chcp 65001 的终端中）。
+const CONSOLE_ENCODING = (process.env.CONSOLE_ENCODING || (process.platform === 'win32' ? 'gbk' : 'utf8')).toLowerCase();
+
+function formatArgs(args) {
+  return args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
+}
+
+console.log = (...args) => {
+  const line = formatArgs(args);
+  writeLogToFile(line);
+
+  if (process.platform === 'win32' && CONSOLE_ENCODING === 'gbk') {
+    try {
+      const buf = iconv.encode(line + '\n', 'gbk');
+      process.stdout.write(buf);
+      return;
+    } catch (e) {
+      // 回退到原始方法
+      _origConsoleLog(line);
+      return;
+    }
+  }
+
+  // 非 Windows 或显式要求 utf8：使用原始 console 输出
+  _origConsoleLog(line);
+};
+
+console.error = (...args) => {
+  const line = formatArgs(args);
+  writeLogToFile('[ERROR] ' + line);
+
+  if (process.platform === 'win32' && CONSOLE_ENCODING === 'gbk') {
+    try {
+      const buf = iconv.encode('[ERROR] ' + line + '\n', 'gbk');
+      process.stderr.write(buf);
+      return;
+    } catch (e) {
+      _origConsoleError(line);
+      return;
+    }
+  }
+
+  _origConsoleError(line);
+};
 
 let mainWindow;
 let overlayWindow;
 let isRecording = false;
 let recordingProcess = null;
 
+// 尝试把图片文件复制到剪贴板，优先使用 nativeImage.createFromPath，回退 createFromBuffer，最后尝试用 FFmpeg 提取第一帧为 PNG 再复制
+function copyImageFileToClipboard(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return false;
+    const ext = path.extname(filePath).toLowerCase();
+
+    // 如果是 GIF，优先尝试把原始 GIF bytes 写入 clipboard 的 image/gif 格式
+    if (ext === '.gif') {
+      try {
+        const buf = fs.readFileSync(filePath);
+        try {
+          clipboard.writeBuffer('image/gif', buf);
+          console.log('已将原始 GIF bytes 写入剪贴板 (image/gif):', filePath);
+        } catch (e) {
+          console.error('写入 image/gif 失败:', e && e.message ? e.message : e);
+        }
+
+        // 尝试把文件名写入 Windows 的 FileNameW（UCS-2 little endian）以支持文件粘贴的应用
+        try {
+          if (process.platform === 'win32') {
+            // UTF-16LE (ucs2) with double null termination for FileNameW
+            const ucs2 = Buffer.from(filePath + '\u0000', 'ucs2');
+            clipboard.writeBuffer('FileNameW', ucs2);
+            console.log('已写入 FileNameW 到剪贴板以支持文件粘贴:', filePath);
+          }
+          if (process.platform === 'darwin') {
+            // public.file-url with file:// URL
+            const fileUrl = 'file://' + filePath;
+            clipboard.writeBuffer('public.file-url', Buffer.from(fileUrl, 'utf8'));
+            console.log('已写入 public.file-url 到剪贴板以支持文件粘贴:', fileUrl);
+          }
+        } catch (e) {
+          console.error('写入文件名相关剪贴板格式失败:', e && e.message ? e.message : e);
+        }
+
+        // 如果至少写入 image/gif 成功，我们认为复制成功（即使某些目标应用可能不读取该格式）
+        return true;
+      } catch (e) {
+        console.error('读取 GIF 文件失败:', e && e.message ? e.message : e);
+      }
+    }
+
+    // 1) 尝试 createFromPath（有时更可靠）
+    try {
+      const img = nativeImage.createFromPath(filePath);
+      if (img && !img.isEmpty()) {
+        try {
+          clipboard.writeImage(img);
+          console.log('已使用 nativeImage.createFromPath 复制图片到剪贴板:', filePath);
+          return true;
+        } catch (e) {
+          console.error('clipboard.writeImage(createFromPath) 失败:', e && e.message ? e.message : e);
+        }
+      }
+    } catch (e) {
+      console.error('nativeImage.createFromPath 失败:', e && e.message ? e.message : e);
+    }
+
+    // 2) 尝试从 Buffer 创建
+    try {
+      const buf = fs.readFileSync(filePath);
+      const img = nativeImage.createFromBuffer(buf);
+      if (img && !img.isEmpty()) {
+        try {
+          clipboard.writeImage(img);
+          console.log('已使用 nativeImage.createFromBuffer 复制图片到剪贴板:', filePath);
+          return true;
+        } catch (e) {
+          console.error('clipboard.writeImage(createFromBuffer) 失败:', e && e.message ? e.message : e);
+        }
+      }
+    } catch (e) {
+      console.error('从文件读取或 createFromBuffer 失败:', e && e.message ? e.message : e);
+    }
+
+    // 3) 最后尝试用 FFmpeg 提取第一帧为 PNG（需要 ffmpeg 可用）
+    try {
+      const tmpPng = path.join(os.tmpdir(), `gif-frame-${Date.now()}.png`);
+      const args = ['-y', '-i', filePath, '-vframes', '1', tmpPng];
+      console.log('尝试用 FFmpeg 提取第一帧为 PNG:', ffmpegPath, args.join(' '));
+      const res = spawnSync(ffmpegPath, args, { stdio: 'inherit' });
+      if (res && res.error) {
+        console.error('FFmpeg 提取帧失败:', res.error && res.error.message ? res.error.message : res.error);
+      }
+      if (fs.existsSync(tmpPng)) {
+        try {
+          const img2 = nativeImage.createFromPath(tmpPng);
+          if (img2 && !img2.isEmpty()) {
+            clipboard.writeImage(img2);
+            console.log('已复制从 GIF 提取的 PNG 到剪贴板:', tmpPng);
+            try { fs.unlinkSync(tmpPng); } catch (_) {}
+            return true;
+          }
+        } catch (e) {
+          console.error('处理提取的 PNG 失败:', e && e.message ? e.message : e);
+        }
+        try { fs.unlinkSync(tmpPng); } catch (_) {}
+      }
+    } catch (e) {
+      console.error('用 FFmpeg 提取帧并复制失败:', e && e.message ? e.message : e);
+    }
+  } catch (e) {
+    console.error('copyImageFileToClipboard 整体失败:', e && e.message ? e.message : e);
+  }
+  return false;
+}
+
 // 自动复制到剪贴板的辅助函数
 function autoCopyToClipboard(filePath) {
   // 添加延迟确保文件完全写入
   setTimeout(() => {
     try {
-      if (fs.existsSync(filePath)) {
-        const ext = path.extname(filePath).toLowerCase();
-        
-        if (ext === '.gif') {
-          // 对于GIF文件，尝试复制为图片
-          try {
-            const image = fs.readFileSync(filePath);
-            clipboard.writeImage(image);
-            console.log('已复制GIF图片到剪贴板:', filePath);
-          } catch (error) {
-            // 如果writeImage失败，尝试复制文件路径
-            console.log('GIF图片复制失败，复制文件路径:', error.message);
-            clipboard.writeText(filePath);
-            console.log('已复制GIF文件路径到剪贴板:', filePath);
-          }
-        } else {
-          // 对于其他图片文件，直接复制图片数据
-          const image = fs.readFileSync(filePath);
-          clipboard.writeImage(image);
-          console.log('已复制图片到剪贴板:', filePath);
-        }
-        return true;
-      } else {
+      if (!fs.existsSync(filePath)) {
         console.log('文件不存在，无法复制:', filePath);
+        return false;
       }
+
+      const ok = copyImageFileToClipboard(filePath);
+      if (!ok) {
+        try { clipboard.writeText(filePath); } catch (e) { console.error('回退写入路径失败:', e && e.message ? e.message : e); }
+        console.log('已复制文件路径到剪贴板:', filePath);
+      }
+      return ok;
     } catch (error) {
-      console.error('复制到剪贴板失败:', error);
+      console.error('自动复制到剪贴板失败:', error && error.message ? error.message : error);
+      try { clipboard.writeText(filePath); } catch (_) {}
     }
     return false;
   }, 1000); // 延迟1秒
@@ -77,7 +265,8 @@ function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
           let stderr = '';
           
           gifProcess.stderr.on('data', (data) => {
-            stderr += data.toString();
+            const chunk = Buffer.isBuffer(data) ? decodeBuffer(data) : String(data);
+            stderr += chunk;
             const progressMatch = stderr.match(/time=(\d+):(\d+):(\d+\.\d+)/);
             if (progressMatch) {
               const hours = parseInt(progressMatch[1]);
@@ -130,7 +319,8 @@ function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
       let stderr = '';
       
       convertProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
+        const chunk = Buffer.isBuffer(data) ? decodeBuffer(data) : String(data);
+        stderr += chunk;
         const progressMatch = stderr.match(/time=(\d+):(\d+):(\d+\.\d+)/);
         if (progressMatch) {
           const hours = parseInt(progressMatch[1]);
@@ -331,8 +521,9 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
       let stderr = '';
       
       recordingProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-        console.log('FFmpeg stderr:', data.toString());
+        const chunk = Buffer.isBuffer(data) ? decodeBuffer(data) : String(data);
+        stderr += chunk;
+        console.log('FFmpeg stderr:', chunk);
         
         // 解析进度信息
         const progressMatch = stderr.match(/time=(\d+):(\d+):(\d+\.\d+)/);
@@ -358,8 +549,8 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-            // 自动复制到剪贴板
-            autoCopyToClipboard(outputFile);
+            // 自动复制到剪贴板（保护性 try/catch）
+            try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
             resolve({ success: true, filePath: outputFile });
           } else {
             // 转换为GIF或WebM
@@ -371,8 +562,8 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
                 }
                 isRecording = false;
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-                // 自动复制到剪贴板
-                autoCopyToClipboard(outputFile);
+                // 自动复制到剪贴板（保护性 try/catch）
+                try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
                 resolve({ success: true, filePath: outputFile });
               })
               .catch((err) => {
@@ -420,23 +611,19 @@ ipcMain.handle('copy-to-clipboard', async (event, filePath) => {
       // 对于图片文件，直接复制到剪贴板
       const ext = path.extname(filePath).toLowerCase();
       
-      if (ext === '.gif') {
-        // 对于GIF文件，尝试复制为图片
-        try {
-          const image = fs.readFileSync(filePath);
-          clipboard.writeImage(image);
-          console.log('手动复制GIF图片成功:', filePath);
-        } catch (error) {
-          // 如果writeImage失败，尝试复制文件路径
-          console.log('GIF图片复制失败，复制文件路径:', error.message);
-          clipboard.writeText(filePath);
-          console.log('手动复制GIF文件路径成功:', filePath);
+      // 尝试把图片文件复制到剪贴板，失败回退为复制路径
+      try {
+        const ok = copyImageFileToClipboard(filePath);
+        if (!ok) {
+          try { clipboard.writeText(filePath); } catch (e) { console.error('回退写入路径失败:', e && e.message ? e.message : e); }
+          console.log('手动复制文件路径成功:', filePath);
+        } else {
+          console.log('手动复制图片成功:', filePath);
         }
-      } else {
-        // 对于其他图片文件，直接复制图片数据
-        const image = fs.readFileSync(filePath);
-        clipboard.writeImage(image);
-        console.log('手动复制图片成功:', filePath);
+      } catch (error) {
+        console.error('手动复制失败:', error && error.message ? error.message : error);
+        try { clipboard.writeText(filePath); } catch (_) {}
+        console.log('手动复制文件路径成功:', filePath);
       }
       return { success: true };
     }
@@ -562,8 +749,9 @@ ipcMain.handle('region-selected', async (event, region) => {
       let stderr = '';
       
       recordingProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-        console.log('FFmpeg stderr:', data.toString());
+        const chunk = Buffer.isBuffer(data) ? decodeBuffer(data) : String(data);
+        stderr += chunk;
+        console.log('FFmpeg stderr:', chunk);
         
         // 解析进度信息
         const progressMatch = stderr.match(/time=(\d+):(\d+):(\d+\.\d+)/);
@@ -589,8 +777,8 @@ ipcMain.handle('region-selected', async (event, region) => {
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-            // 自动复制到剪贴板
-            autoCopyToClipboard(outputFile);
+                // 自动复制到剪贴板（保护性 try/catch）
+                try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
             resolve({ success: true, filePath: outputFile });
           } else {
             // 转换为GIF或WebM
@@ -602,8 +790,8 @@ ipcMain.handle('region-selected', async (event, region) => {
                 }
                 isRecording = false;
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-                // 自动复制到剪贴板
-                autoCopyToClipboard(outputFile);
+                // 自动复制到剪贴板（保护性 try/catch）
+                try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
                 resolve({ success: true, filePath: outputFile });
               })
               .catch((err) => {

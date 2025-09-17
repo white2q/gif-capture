@@ -154,6 +154,16 @@ npm run build
    - macOS 10.14+
    - Linux (Ubuntu 18.04+)
 
+## 日志与终端编码（Windows）
+
+在 Windows 控制台（尤其是 cmd.exe / PowerShell）中，默认代码页可能不是 UTF-8，导致控制台输出中文出现乱码。运行应用或调试时，如遇到日志乱码，可在启动前在 PowerShell 中执行：
+
+```powershell
+chcp 65001
+```
+
+或者在支持 UTF-8 的终端（例如 Windows Terminal）中运行应用。我们在 `main.js` 中已加入对 FFmpeg 输出用 `iconv-lite` 的自动解码，以降低乱码概率，但仍建议将终端设置为 UTF-8 以获得最佳效果。
+
 ## 🤝 贡献
 
 欢迎提交Issue和Pull Request来改进这个项目！
