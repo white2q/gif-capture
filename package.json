@@ -1,0 +1,60 @@
+{
+  "name": "gif-capture",
+  "version": "1.0.0",
+  "description": "跨平台GIF截图工具 - 快速录制屏幕区域并导出为GIF",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder",
+    "dist": "electron-builder --publish=never"
+  },
+  "keywords": [
+    "gif",
+    "screen-capture",
+    "recording",
+    "electron",
+    "ffmpeg"
+  ],
+  "author": "GIF Capture Tool",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.6.4"
+  },
+  "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0"
+  },
+  "build": {
+    "appId": "com.gifcapture.app",
+    "productName": "GIF Capture",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/ffmpeg-static/ffmpeg.exe",
+      "!node_modules/ffmpeg-static/ffmpeg",
+      "!node_modules/ffmpeg-static/ffmpeg.exe.gz"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/ffmpeg-static",
+        "to": "ffmpeg-static",
+        "filter": ["**/*"]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png"
+    }
+  }
+}

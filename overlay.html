@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>选择录制区域</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: rgba(0, 0, 0, 0.3);
+            cursor: crosshair;
+            user-select: none;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+
+        .overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(2px);
+        }
+
+        .selection-box {
+            position: absolute;
+            border: 2px solid #667eea;
+            background: rgba(102, 126, 234, 0.1);
+            pointer-events: none;
+            display: none;
+        }
+
+        .instructions {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px 30px;
+            border-radius: 12px;
+            text-align: center;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 1000;
+        }
+
+        .instructions h2 {
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+
+        .instructions p {
+            margin-bottom: 15px;
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 14px;
+        }
+
+        .instructions .shortcuts {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .instructions .shortcuts span {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin: 0 2px;
+            font-family: monospace;
+        }
+
+        .coordinates {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 12px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 1000;
+            display: none;
+        }
+
+        .confirm-panel {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.9);
+            color: white;
+            padding: 15px 25px;
+            border-radius: 12px;
+            display: none;
+            gap: 15px;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 1000;
+        }
+
+        .confirm-panel button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .btn-confirm {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-confirm:hover {
+            background: #218838;
+            transform: translateY(-1px);
+        }
+
+        .btn-cancel {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-cancel:hover {
+            background: #5a6268;
+            transform: translateY(-1px);
+        }
+
+        .btn-reset {
+            background: #ffc107;
+            color: #212529;
+        }
+
+        .btn-reset:hover {
+            background: #e0a800;
+            transform: translateY(-1px);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="overlay" id="overlay"></div>
+    <div class="selection-box" id="selectionBox"></div>
+    
+    <div class="instructions" id="instructions">
+        <h2>🎯 选择录制区域</h2>
+        <p>拖拽鼠标选择要录制的屏幕区域</p>
+        <div class="shortcuts">
+            按 <span>Esc</span> 取消 | <span>Enter</span> 确认选择
+        </div>
+    </div>
+
+    <div class="coordinates" id="coordinates">
+        <div>X: <span id="xValue">0</span></div>
+        <div>Y: <span id="yValue">0</span></div>
+        <div>宽: <span id="widthValue">0</span></div>
+        <div>高: <span id="heightValue">0</span></div>
+    </div>
+
+    <div class="confirm-panel" id="confirmPanel">
+        <span>确认录制此区域？</span>
+        <button class="btn-confirm" id="confirmBtn">✓ 确认</button>
+        <button class="btn-reset" id="resetBtn">↻ 重选</button>
+        <button class="btn-cancel" id="cancelBtn">✗ 取消</button>
+    </div>
+
+    <script>
+        const { ipcRenderer } = require('electron');
+
+        let isSelecting = false;
+        let startX = 0;
+        let startY = 0;
+        let currentX = 0;
+        let currentY = 0;
+        let selection = null;
+
+        const overlay = document.getElementById('overlay');
+        const selectionBox = document.getElementById('selectionBox');
+        const instructions = document.getElementById('instructions');
+        const coordinates = document.getElementById('coordinates');
+        const confirmPanel = document.getElementById('confirmPanel');
+        const confirmBtn = document.getElementById('confirmBtn');
+        const resetBtn = document.getElementById('resetBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+
+        const xValue = document.getElementById('xValue');
+        const yValue = document.getElementById('yValue');
+        const widthValue = document.getElementById('widthValue');
+        const heightValue = document.getElementById('heightValue');
+
+        // 鼠标按下开始选择
+        overlay.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return; // 只响应左键
+
+            isSelecting = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            currentX = e.clientX;
+            currentY = e.clientY;
+
+            selectionBox.style.display = 'block';
+            instructions.classList.add('hidden');
+            coordinates.classList.remove('hidden');
+            confirmPanel.classList.add('hidden');
+
+            updateSelectionBox();
+        });
+
+        // 鼠标移动更新选择
+        overlay.addEventListener('mousemove', (e) => {
+            if (!isSelecting) return;
+
+            currentX = e.clientX;
+            currentY = e.clientY;
+            updateSelectionBox();
+        });
+
+        // 鼠标释放结束选择
+        overlay.addEventListener('mouseup', (e) => {
+            if (!isSelecting || e.button !== 0) return;
+
+            isSelecting = false;
+            
+            const width = Math.abs(currentX - startX);
+            const height = Math.abs(currentY - startY);
+
+            if (width > 10 && height > 10) { // 最小选择区域
+                selection = {
+                    x: Math.min(startX, currentX),
+                    y: Math.min(startY, currentY),
+                    width: width,
+                    height: height
+                };
+                confirmPanel.classList.remove('hidden');
+            } else {
+                resetSelection();
+            }
+        });
+
+        // 更新选择框
+        function updateSelectionBox() {
+            const left = Math.min(startX, currentX);
+            const top = Math.min(startY, currentY);
+            const width = Math.abs(currentX - startX);
+            const height = Math.abs(currentY - startY);
+
+            selectionBox.style.left = left + 'px';
+            selectionBox.style.top = top + 'px';
+            selectionBox.style.width = width + 'px';
+            selectionBox.style.height = height + 'px';
+
+            // 更新坐标显示
+            xValue.textContent = Math.round(left);
+            yValue.textContent = Math.round(top);
+            widthValue.textContent = Math.round(width);
+            heightValue.textContent = Math.round(height);
+        }
+
+        // 重置选择
+        function resetSelection() {
+            selection = null;
+            selectionBox.style.display = 'none';
+            instructions.classList.remove('hidden');
+            coordinates.classList.add('hidden');
+            confirmPanel.classList.add('hidden');
+        }
+
+        // 确认选择
+        confirmBtn.addEventListener('click', async () => {
+            if (selection) {
+                try {
+                    // 发送选择结果到主进程
+                    await ipcRenderer.invoke('region-selected', selection);
+                } catch (error) {
+                    console.error('发送区域选择结果失败:', error);
+                }
+            }
+        });
+
+        // 重选
+        resetBtn.addEventListener('click', () => {
+            resetSelection();
+        });
+
+        // 取消
+        cancelBtn.addEventListener('click', () => {
+            ipcRenderer.invoke('close-region-selector');
+        });
+
+        // 键盘事件
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                ipcRenderer.invoke('close-region-selector');
+            } else if (e.key === 'Enter' && selection) {
+                confirmBtn.click();
+            }
+        });
+
+        // 防止右键菜单
+        document.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+
+        // 防止拖拽
+        document.addEventListener('dragstart', (e) => {
+            e.preventDefault();
+        });
+    </script>
+</body>
+</html>
