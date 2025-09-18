@@ -461,9 +461,14 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
   } = options;
 
   try {
+    // 先隐藏窗口，而不是最小化，避免缩放过程被录制
+    mainWindow.hide();
+    
+    // 等待一小段时间确保窗口完全隐藏
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
     isRecording = true;
     mainWindow.webContents.send('recording-started');
-
     const desktopPath = path.join(os.homedir(), 'Desktop');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const tempFile = path.join(desktopPath, `temp-capture-${timestamp}.mp4`);
@@ -561,6 +566,9 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
                   fs.unlinkSync(tempFile);
                 }
                 isRecording = false;
+                // 录制结束后显示窗口（因为我们使用了hide而不是minimize）
+                mainWindow.show();
+                mainWindow.focus();
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
                 // 自动复制到剪贴板（保护性 try/catch）
                 try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
@@ -648,6 +656,8 @@ ipcMain.handle('open-file-location', async (event, filePath) => {
 
 // 显示区域选择窗口
 ipcMain.handle('show-region-selector', () => {
+  // 录制开始时最小化主窗口
+  mainWindow.hide();
   createOverlayWindow();
   return { success: true };
 });
@@ -789,6 +799,8 @@ ipcMain.handle('region-selected', async (event, region) => {
                   fs.unlinkSync(tempFile);
                 }
                 isRecording = false;
+                mainWindow.show();
+                mainWindow.focus();
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
                 // 自动复制到剪贴板（保护性 try/catch）
                 try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
