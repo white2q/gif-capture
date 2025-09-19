@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell, nativeImage, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -103,6 +103,105 @@ let mainWindow;
 let overlayWindow;
 let isRecording = false;
 let recordingProcess = null;
+let registeredShortcuts = {};
+let currentTempFile = null;
+let cachedSettings = null;
+
+const DEFAULT_SHORTCUTS = {
+  fullscreen: 'CommandOrControl+Shift+G',
+  region: 'CommandOrControl+Shift+R'
+};
+
+function getSettingsPath() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+function loadSettings() {
+  try {
+    const settingsPath = getSettingsPath();
+    if (fs.existsSync(settingsPath)) {
+      const data = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      cachedSettings = data || {};
+      return cachedSettings;
+    }
+  } catch (e) {
+    console.error('加载设置失败，将使用默认值:', e && e.message ? e.message : e);
+  }
+  cachedSettings = {};
+  return cachedSettings;
+}
+
+function saveSettings(next) {
+  try {
+    const settingsPath = getSettingsPath();
+    let data = loadSettings();
+    data = { ...(data || {}), ...(next || {}) };
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2), 'utf8');
+    cachedSettings = data;
+  } catch (e) {
+    console.error('保存设置失败:', e && e.message ? e.message : e);
+  }
+}
+
+function loadShortcuts() {
+  const settings = loadSettings();
+  const fromFile = (settings && settings.shortcuts) ? settings.shortcuts : {};
+  return { ...DEFAULT_SHORTCUTS, ...fromFile };
+}
+
+function saveShortcuts(shortcuts) {
+  const merged = { ...(cachedSettings || loadSettings()) };
+  merged.shortcuts = shortcuts;
+  saveSettings(merged);
+}
+
+function getSavePath() {
+  const settings = cachedSettings || loadSettings();
+  return settings && settings.savePath ? settings.savePath : null;
+}
+
+function setSavePath(dir) {
+  const next = { ...(cachedSettings || loadSettings()), savePath: dir };
+  saveSettings(next);
+}
+
+function unregisterShortcut(name) {
+  try {
+    if (registeredShortcuts[name]) {
+      globalShortcut.unregister(registeredShortcuts[name]);
+      delete registeredShortcuts[name];
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+
+function registerAllShortcuts(shortcuts) {
+  // 清理旧的
+  try { globalShortcut.unregisterAll(); } catch (_) {}
+  registeredShortcuts = {};
+
+  // 全屏录制
+  if (shortcuts.fullscreen) {
+    const ok = globalShortcut.register(shortcuts.fullscreen, () => {
+      if (mainWindow) {
+        mainWindow.webContents.send('hotkey-fullscreen');
+      }
+    });
+    if (ok) registeredShortcuts.fullscreen = shortcuts.fullscreen; else console.error('注册全屏快捷键失败:', shortcuts.fullscreen);
+  }
+
+  // 区域录制
+  if (shortcuts.region) {
+    const ok2 = globalShortcut.register(shortcuts.region, () => {
+      if (mainWindow) {
+        mainWindow.webContents.send('hotkey-region');
+      }
+    });
+    if (ok2) registeredShortcuts.region = shortcuts.region; else console.error('注册区域快捷键失败:', shortcuts.region);
+  }
+}
 
 // 尝试把图片文件复制到剪贴板，优先使用 nativeImage.createFromPath，回退 createFromBuffer，最后尝试用 FFmpeg 提取第一帧为 PNG 再复制
 function copyImageFileToClipboard(filePath) {
@@ -352,13 +451,15 @@ function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
 // 创建主窗口
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 400,
-    height: 600,
+    width: 480,
+    height: 680,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false
     },
-    resizable: false,
+    resizable: true,
+    minWidth: 420,
+    minHeight: 600,
     title: 'GIF Capture Tool',
     icon: path.join(__dirname, 'assets/icon.png')
   });
@@ -392,18 +493,24 @@ function createOverlayWindow() {
 
   overlayWindow.loadFile('overlay.html');
   overlayWindow.setFullScreen(true);
+  overlayWindow.on('closed', () => {
+    overlayWindow = null;
+    try {
+      if (mainWindow && !isRecording) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    } catch (_) {}
+  });
 }
 
 // 应用准备就绪
 app.whenReady().then(() => {
   createMainWindow();
 
-  // 注册全局快捷键 Ctrl+Shift+G
-  globalShortcut.register('CommandOrControl+Shift+G', () => {
-    if (mainWindow) {
-      mainWindow.webContents.send('start-recording');
-    }
-  });
+  // 加载并注册全局快捷键
+  const shortcuts = loadShortcuts();
+  registerAllShortcuts(shortcuts);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -427,13 +534,100 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+// 选择保存路径
+ipcMain.handle('choose-save-path', async () => {
+  try {
+    const res = await dialog.showOpenDialog({
+      properties: ['openDirectory', 'createDirectory']
+    });
+    if (res.canceled || !res.filePaths || !res.filePaths[0]) {
+      return { success: false, message: '已取消选择' };
+    }
+    const dir = res.filePaths[0];
+    setSavePath(dir);
+    return { success: true, path: dir };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
+
+// 获取保存路径
+ipcMain.handle('get-save-path', () => {
+  try {
+    const p = getSavePath();
+    return { success: true, path: p };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
 
 // 应用即将退出时注销快捷键
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  try {
+    if (recordingProcess) {
+      recordingProcess.kill('SIGTERM');
+    }
+  } catch (_) {}
+  try {
+    if (currentTempFile && fs.existsSync(currentTempFile)) {
+      fs.unlinkSync(currentTempFile);
+    }
+  } catch (_) {}
+  try { currentTempFile = null; } catch (_) {}
 });
 
 // IPC 事件处理
+ipcMain.handle('get-shortcuts', () => {
+  try {
+    const s = loadShortcuts();
+    return { success: true, shortcuts: s };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
+
+ipcMain.handle('set-shortcuts', (event, next) => {
+  try {
+    const merged = { ...DEFAULT_SHORTCUTS, ...next };
+    // 尝试注册新快捷键
+    registerAllShortcuts(merged);
+    // 持久化
+    saveShortcuts(merged);
+    return { success: true, shortcuts: merged };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
+
+ipcMain.handle('reset-shortcuts', () => {
+  try {
+    registerAllShortcuts(DEFAULT_SHORTCUTS);
+    saveShortcuts(DEFAULT_SHORTCUTS);
+    return { success: true, shortcuts: { ...DEFAULT_SHORTCUTS } };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
+// 暂停/恢复全局快捷键（用于在录入快捷键时避免冲突）
+ipcMain.handle('pause-shortcuts', () => {
+  try {
+    globalShortcut.unregisterAll();
+    return { success: true };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
+
+ipcMain.handle('resume-shortcuts', () => {
+  try {
+    const s = loadShortcuts();
+    registerAllShortcuts(s);
+    return { success: true };
+  } catch (e) {
+    return { success: false, message: e && e.message ? e.message : String(e) };
+  }
+});
 ipcMain.handle('get-screen-sources', async () => {
   try {
     const sources = await desktopCapturer.getSources({
@@ -469,10 +663,12 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
     
     isRecording = true;
     mainWindow.webContents.send('recording-started');
-    const desktopPath = path.join(os.homedir(), 'Desktop');
+    const preferredDir = getSavePath();
+    const saveDir = (preferredDir && fs.existsSync(preferredDir)) ? preferredDir : path.join(os.homedir(), 'Desktop');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const tempFile = path.join(desktopPath, `temp-capture-${timestamp}.mp4`);
-    const outputFile = path.join(desktopPath, `capture-${timestamp}.${format}`);
+    const tempFile = path.join(saveDir, `temp-capture-${timestamp}.mp4`);
+    currentTempFile = tempFile;
+    const outputFile = path.join(saveDir, `capture-${timestamp}.${format}`);
 
     // 构建FFmpeg录制命令参数
     let recordArgs = [];
@@ -553,6 +749,8 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
             // 直接重命名MP4文件
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
+            try { currentTempFile = null; } catch (_) {}
+            try { mainWindow.show(); mainWindow.focus(); } catch (_) {}
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
             // 自动复制到剪贴板（保护性 try/catch）
             try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
@@ -563,9 +761,10 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
               .then(() => {
                 // 删除临时文件
                 if (fs.existsSync(tempFile)) {
-                  fs.unlinkSync(tempFile);
+                  try { fs.unlinkSync(tempFile); } catch (_) {}
                 }
                 isRecording = false;
+                try { currentTempFile = null; } catch (_) {}
                 // 录制结束后显示窗口（因为我们使用了hide而不是minimize）
                 mainWindow.show();
                 mainWindow.focus();
@@ -576,12 +775,24 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
               })
               .catch((err) => {
                 isRecording = false;
+                try {
+                  if (currentTempFile && fs.existsSync(currentTempFile)) {
+                    fs.unlinkSync(currentTempFile);
+                  }
+                } catch (_) {}
+                try { currentTempFile = null; } catch (_) {}
                 mainWindow.webContents.send('recording-error', err.message);
                 reject({ success: false, message: err.message });
               });
           }
         } else {
           isRecording = false;
+          try {
+            if (currentTempFile && fs.existsSync(currentTempFile)) {
+              fs.unlinkSync(currentTempFile);
+            }
+          } catch (_) {}
+          try { currentTempFile = null; } catch (_) {}
           mainWindow.webContents.send('recording-error', `录制失败，FFmpeg 退出码: ${code}`);
           reject({ success: false, message: `录制失败，FFmpeg 退出码: ${code}` });
         }
@@ -589,6 +800,12 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
 
       recordingProcess.on('error', (err) => {
         isRecording = false;
+        try {
+          if (currentTempFile && fs.existsSync(currentTempFile)) {
+            fs.unlinkSync(currentTempFile);
+          }
+        } catch (_) {}
+        try { currentTempFile = null; } catch (_) {}
         mainWindow.webContents.send('recording-error', err.message);
         reject({ success: false, message: err.message });
       });
@@ -606,6 +823,12 @@ ipcMain.handle('stop-recording', () => {
   if (recordingProcess && isRecording) {
     recordingProcess.kill('SIGTERM');
     isRecording = false;
+    try {
+      if (currentTempFile && fs.existsSync(currentTempFile)) {
+        fs.unlinkSync(currentTempFile);
+      }
+    } catch (_) {}
+    try { currentTempFile = null; } catch (_) {}
     return { success: true };
   }
   return { success: false, message: '没有正在进行的录制' };
@@ -682,6 +905,7 @@ ipcMain.handle('region-selected', async (event, region) => {
     overlayWindow.close();
     overlayWindow = null;
   }
+  // 此处立即开始录制，不显示主窗口，避免遮挡
   
   // 直接调用录制函数
   if (isRecording) {
@@ -710,10 +934,12 @@ ipcMain.handle('region-selected', async (event, region) => {
     isRecording = true;
     mainWindow.webContents.send('recording-started');
 
-    const desktopPath = path.join(os.homedir(), 'Desktop');
+    const preferredDir = getSavePath();
+    const saveDir = (preferredDir && fs.existsSync(preferredDir)) ? preferredDir : path.join(os.homedir(), 'Desktop');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const tempFile = path.join(desktopPath, `temp-capture-${timestamp}.mp4`);
-    const outputFile = path.join(desktopPath, `capture-${timestamp}.${options.format}`);
+    const tempFile = path.join(saveDir, `temp-capture-${timestamp}.mp4`);
+    currentTempFile = tempFile;
+    const outputFile = path.join(saveDir, `capture-${timestamp}.${options.format}`);
 
     // 构建FFmpeg录制命令参数
     let recordArgs = [];
@@ -839,6 +1065,13 @@ ipcMain.handle('close-region-selector', () => {
     overlayWindow.close();
     overlayWindow = null;
   }
+  // 仅在未录制时显示主窗口，避免遮挡录屏
+  try {
+    if (mainWindow && !isRecording) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  } catch (_) {}
   return { success: true };
 });
 

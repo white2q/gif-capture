@@ -40,23 +40,24 @@
 
         .container {
             flex: 1;
-            padding: 20px;
+            padding: 16px;
             display: flex;
             flex-direction: column;
-            gap: 20px;
+            gap: 16px;
         }
 
         .control-panel {
             background: white;
             border-radius: 12px;
-            padding: 20px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            padding: 16px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
         }
 
         .button-group {
             display: flex;
             gap: 10px;
-            margin-bottom: 20px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
         }
 
         .btn {
@@ -111,9 +112,9 @@
 
         .settings {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 15px;
-            margin-bottom: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 12px;
+            margin-bottom: 12px;
         }
 
         .setting-group {
@@ -148,10 +149,10 @@
         .status {
             background: #f8f9fa;
             border-radius: 8px;
-            padding: 15px;
+            padding: 12px;
             text-align: center;
             margin-bottom: 20px;
-            min-height: 50px;
+            min-height: 44px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -181,7 +182,7 @@
             background: #e9ecef;
             border-radius: 3px;
             overflow: hidden;
-            margin-top: 10px;
+            margin-top: 8px;
         }
 
         .progress-fill {
@@ -194,7 +195,7 @@
         .shortcuts {
             background: rgba(255, 255, 255, 0.1);
             border-radius: 8px;
-            padding: 15px;
+            padding: 12px;
             color: rgba(255, 255, 255, 0.8);
             font-size: 12px;
         }
@@ -230,8 +231,55 @@
             font-size: 12px;
         }
 
+        .save-path {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #6c757d;
+        }
+
+        .save-path .path-text {
+            flex: 1;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
         .hidden {
             display: none !important;
+        }
+
+        .shortcut-editors {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .shortcut-input {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            background: rgba(255, 255, 255, 0.15);
+            padding: 6px 8px;
+            border-radius: 6px;
+        }
+
+        .shortcut-input input {
+            flex: 1;
+            padding: 6px 8px;
+            border: none;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.9);
+            font-size: 12px;
+        }
+
+        .shortcut-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            flex-wrap: wrap;
         }
     </style>
 </head>
@@ -296,17 +344,42 @@
                     📋 复制到剪贴板
                 </button>
             </div>
+
+            <div class="save-path">
+                <span>保存目录:</span>
+                <span id="savePathText" class="path-text">桌面</span>
+                <button id="chooseSavePath" class="btn btn-secondary">选择目录</button>
+            </div>
         </div>
 
         <div class="shortcuts">
             <h3>⌨️ 快捷键</h3>
             <div class="shortcut-item">
                 <span>开始录制</span>
-                <span class="shortcut-key">Ctrl+Shift+G</span>
+                <span id="shortcutFullscreen" class="shortcut-key">Ctrl+Shift+G</span>
             </div>
             <div class="shortcut-item">
                 <span>停止录制</span>
                 <span class="shortcut-key">Esc</span>
+            </div>
+            <div class="shortcut-item">
+                <span>选择区域</span>
+                <span id="shortcutRegion" class="shortcut-key">Ctrl+Shift+R</span>
+            </div>
+
+            <div class="shortcut-editors">
+                <div class="shortcut-input">
+                    <label for="inputShortcutFullscreen">全屏:</label>
+                    <input id="inputShortcutFullscreen" placeholder="按下组合键以记录" readonly />
+                </div>
+                <div class="shortcut-input">
+                    <label for="inputShortcutRegion">区域:</label>
+                    <input id="inputShortcutRegion" placeholder="按下组合键以记录" readonly />
+                </div>
+            </div>
+            <div class="shortcut-actions">
+                <button id="btnSaveShortcuts" class="btn btn-secondary">保存快捷键</button>
+                <button id="btnResetShortcuts" class="btn btn-secondary">恢复默认</button>
             </div>
         </div>
     </div>
@@ -326,6 +399,14 @@
         const fileActions = document.getElementById('fileActions');
         const openLocationBtn = document.getElementById('openLocation');
         const copyToClipboardBtn = document.getElementById('copyToClipboard');
+        const savePathText = document.getElementById('savePathText');
+        const chooseSavePathBtn = document.getElementById('chooseSavePath');
+        const shortcutFullscreenSpan = document.getElementById('shortcutFullscreen');
+        const shortcutRegionSpan = document.getElementById('shortcutRegion');
+        const inputShortcutFullscreen = document.getElementById('inputShortcutFullscreen');
+        const inputShortcutRegion = document.getElementById('inputShortcutRegion');
+        const btnSaveShortcuts = document.getElementById('btnSaveShortcuts');
+        const btnResetShortcuts = document.getElementById('btnResetShortcuts');
 
         // 设置元素
         const durationInput = document.getElementById('duration');
@@ -450,6 +531,149 @@
             }
         });
 
+        // 渲染进程响应主进程热键
+        ipcRenderer.on('hotkey-fullscreen', () => {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                startRecording();
+            }
+        });
+
+        ipcRenderer.on('hotkey-region', async () => {
+            if (isRecording) return;
+            try { await ipcRenderer.invoke('show-region-selector'); } catch (err) { updateUI('error', `打开区域选择器失败: ${err.message}`); }
+        });
+
+        // 载入并显示快捷键
+        async function loadAndRenderShortcuts() {
+            try {
+                const res = await ipcRenderer.invoke('get-shortcuts');
+                if (res && res.success) {
+                    const s = res.shortcuts || {};
+                    shortcutFullscreenSpan.textContent = s.fullscreen || 'Ctrl+Shift+G';
+                    shortcutRegionSpan.textContent = s.region || 'Ctrl+Shift+R';
+                    inputShortcutFullscreen.value = s.fullscreen || '';
+                    inputShortcutRegion.value = s.region || '';
+                }
+            } catch (_) {}
+        }
+
+        function toAcceleratorFromEvent(e) {
+            const parts = [];
+            if (e.ctrlKey) parts.push('Ctrl');
+            if (e.metaKey) parts.push('Command');
+            if (e.altKey) parts.push('Alt');
+            if (e.shiftKey) parts.push('Shift');
+            const key = e.key;
+            const specialMap = {
+                ' ': 'Space',
+                'Escape': 'Esc',
+                'ArrowUp': 'Up',
+                'ArrowDown': 'Down',
+                'ArrowLeft': 'Left',
+                'ArrowRight': 'Right',
+                'Enter': 'Enter',
+                'Tab': 'Tab',
+                'Backspace': 'Backspace',
+                'Delete': 'Delete',
+                'Home': 'Home',
+                'End': 'End',
+                'PageUp': 'PageUp',
+                'PageDown': 'PageDown',
+                'Insert': 'Insert'
+            };
+            let keyPart = key;
+            if (specialMap[key]) keyPart = specialMap[key];
+            else if (/^F\d{1,2}$/i.test(key)) keyPart = key.toUpperCase();
+            else if (key.length === 1) keyPart = key.length === 1 ? key.toUpperCase() : key;
+            // 排除纯修饰键
+            if (['Control','Shift','Alt','Meta'].includes(key)) keyPart = '';
+            if (!keyPart && parts.length === 0) return '';
+            if (keyPart) parts.push(keyPart);
+            return parts.join('+');
+        }
+
+        async function bindCaptureOnInput(inputEl) {
+            inputEl.addEventListener('focus', async () => {
+                try { await ipcRenderer.invoke('pause-shortcuts'); } catch (_) {}
+            });
+            const handler = async (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                const acc = toAcceleratorFromEvent(e);
+                if (acc) {
+                    inputEl.value = acc.replace('Ctrl', 'CommandOrControl');
+                }
+            };
+            inputEl.addEventListener('keydown', handler);
+            inputEl.addEventListener('blur', async () => {
+                try { await ipcRenderer.invoke('resume-shortcuts'); } catch (_) {}
+            });
+        }
+
+        bindCaptureOnInput(inputShortcutFullscreen);
+        bindCaptureOnInput(inputShortcutRegion);
+
+        async function refreshSavePath() {
+            try {
+                const res = await ipcRenderer.invoke('get-save-path');
+                if (res && res.success && res.path) {
+                    savePathText.textContent = res.path;
+                } else {
+                    savePathText.textContent = '桌面';
+                }
+            } catch (_) {
+                savePathText.textContent = '桌面';
+            }
+        }
+
+        chooseSavePathBtn.addEventListener('click', async () => {
+            try {
+                const res = await ipcRenderer.invoke('choose-save-path');
+                if (res && res.success) {
+                    savePathText.textContent = res.path;
+                    updateUI('completed', '保存目录已更新');
+                } else if (res && res.message) {
+                    updateUI('ready', '准备就绪，点击开始录制');
+                }
+            } catch (e) {
+                updateUI('error', `选择保存目录失败: ${e.message}`);
+            }
+        });
+
+        btnSaveShortcuts.addEventListener('click', async () => {
+            const next = {
+                fullscreen: inputShortcutFullscreen.value.trim() || undefined,
+                region: inputShortcutRegion.value.trim() || undefined
+            };
+            try {
+                const res = await ipcRenderer.invoke('set-shortcuts', next);
+                if (res.success) {
+                    updateUI('completed', '快捷键已保存');
+                    await loadAndRenderShortcuts();
+                } else {
+                    updateUI('error', `保存失败: ${res.message}`);
+                }
+            } catch (e) {
+                updateUI('error', `保存失败: ${e.message}`);
+            }
+        });
+
+        btnResetShortcuts.addEventListener('click', async () => {
+            try {
+                const res = await ipcRenderer.invoke('reset-shortcuts');
+                if (res.success) {
+                    updateUI('completed', '已恢复默认快捷键');
+                    await loadAndRenderShortcuts();
+                } else {
+                    updateUI('error', `重置失败: ${res.message}`);
+                }
+            } catch (e) {
+                updateUI('error', `重置失败: ${e.message}`);
+            }
+        });
+
         // IPC 事件监听
         ipcRenderer.on('recording-started', () => {
             updateUI('recording', '正在录制中...');
@@ -476,6 +700,8 @@
 
         // 初始化
         updateUI('ready', '准备就绪，点击开始录制');
+        loadAndRenderShortcuts();
+        refreshSavePath();
     </script>
 </body>
 </html>
