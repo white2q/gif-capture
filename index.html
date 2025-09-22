@@ -698,8 +698,26 @@
 
         // 区域选择功能已通过IPC处理，无需监听postMessage
 
+        // 检查FFmpeg状态
+        async function checkFFmpegStatus() {
+            try {
+                const status = await ipcRenderer.invoke('get-ffmpeg-status');
+                
+                if (!status.available) {
+                    updateUI('error', 'FFmpeg不可用，请重新打包应用');
+                    recordFullScreenBtn.disabled = true;
+                    recordRegionBtn.disabled = true;
+                } else {
+                    updateUI('ready', '准备就绪，点击开始录制');
+                }
+            } catch (error) {
+                console.error('检查FFmpeg状态失败:', error);
+                updateUI('error', '无法检查FFmpeg状态');
+            }
+        }
+
         // 初始化
-        updateUI('ready', '准备就绪，点击开始录制');
+        checkFFmpegStatus();
         loadAndRenderShortcuts();
         refreshSavePath();
     </script>

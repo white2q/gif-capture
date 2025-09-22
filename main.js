@@ -1,9 +1,59 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, clipboard, shell, nativeImage, dialog, Tray, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+// 获取FFmpeg路径，支持开发环境和打包环境
+function getFFmpegPath() {
+  try {
+    // 开发环境
+    if (!app.isPackaged) {
+      return require('@ffmpeg-installer/ffmpeg').path;
+    }
+    
+    // 打包环境 - 主要路径
+    const mainPath = path.join(process.resourcesPath, 'ffmpeg-static', 'ffmpeg.exe');
+    if (fs.existsSync(mainPath)) {
+      return mainPath;
+    }
+    
+    // 备用路径
+    const altPath = path.join(__dirname, '..', 'ffmpeg-static', 'ffmpeg.exe');
+    if (fs.existsSync(altPath)) {
+      return altPath;
+    }
+    
+    // 最后尝试系统PATH
+    return 'ffmpeg.exe';
+    
+  } catch (error) {
+    console.error('获取FFmpeg路径失败:', error);
+    return 'ffmpeg.exe';
+  }
+}
+
+const ffmpegPath = getFFmpegPath();
+
+// 检测FFmpeg是否可用
+function checkFFmpegAvailability() {
+  try {
+    // 如果路径不是系统PATH，检查文件是否存在
+    if (ffmpegPath !== 'ffmpeg.exe' && !fs.existsSync(ffmpegPath)) {
+      return false;
+    }
+    
+    const result = spawnSync(ffmpegPath, ['-version'], { 
+      stdio: 'pipe',
+      timeout: 5000 
+    });
+    
+    return result.status === 0;
+  } catch (error) {
+    console.error('FFmpeg检测失败:', error);
+    return false;
+  }
+}
+
 // 确保日志在 Windows 上不会出现 GBK/ANSI 的乱码
 const iconv = require('iconv-lite');
 
@@ -101,6 +151,7 @@ console.error = (...args) => {
 
 let mainWindow;
 let overlayWindow;
+let tray = null;
 let isRecording = false;
 let recordingProcess = null;
 let registeredShortcuts = {};
@@ -470,6 +521,15 @@ function createMainWindow() {
   if (process.argv.includes('--dev')) {
     mainWindow.webContents.openDevTools();
   }
+
+  // 处理窗口关闭事件，隐藏到托盘而不是真正关闭
+  mainWindow.on('close', (event) => {
+    // 在Windows和Linux上，关闭窗口时隐藏到托盘
+    if (process.platform !== 'darwin') {
+      event.preventDefault();
+      mainWindow.hide();
+    }
+  });
 }
 
 // 创建区域选择覆盖窗口
@@ -504,9 +564,120 @@ function createOverlayWindow() {
   });
 }
 
+// 更新托盘菜单
+function updateTrayMenu() {
+  if (!tray) return;
+  
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示窗口',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      }
+    },
+    {
+      label: '隐藏窗口',
+      click: () => {
+        if (mainWindow) {
+          mainWindow.hide();
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: isRecording ? '正在录制中...' : '开始录制全屏',
+      enabled: !isRecording,
+      click: () => {
+        if (mainWindow && !isRecording) {
+          mainWindow.webContents.send('hotkey-fullscreen');
+        }
+      }
+    },
+    {
+      label: '选择区域录制',
+      enabled: !isRecording,
+      click: () => {
+        if (mainWindow && !isRecording) {
+          mainWindow.webContents.send('hotkey-region');
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '退出应用',
+      click: () => {
+        console.log('用户点击退出应用');
+        // 清理资源
+        try {
+          if (recordingProcess) {
+            recordingProcess.kill('SIGTERM');
+          }
+        } catch (e) {
+          console.error('清理录制进程失败:', e);
+        }
+        
+        try {
+          if (currentTempFile && fs.existsSync(currentTempFile)) {
+            fs.unlinkSync(currentTempFile);
+          }
+        } catch (e) {
+          console.error('清理临时文件失败:', e);
+        }
+        
+        // 注销快捷键
+        try {
+          globalShortcut.unregisterAll();
+        } catch (e) {
+          console.error('注销快捷键失败:', e);
+        }
+        
+        // 销毁托盘
+        try {
+          if (tray) {
+            tray.destroy();
+            tray = null;
+          }
+        } catch (e) {
+          console.error('销毁托盘失败:', e);
+        }
+        
+        // 退出应用
+        app.quit();
+      }
+    }
+  ]);
+  
+  tray.setContextMenu(contextMenu);
+}
+
+// 创建托盘
+function createTray() {
+  const trayIconPath = path.join(__dirname, 'assets', 'tray-icon.png');
+  tray = new Tray(trayIconPath);
+  
+  updateTrayMenu();
+  tray.setToolTip('GIF Capture Tool');
+  
+  // 双击托盘图标显示/隐藏窗口
+  tray.on('double-click', () => {
+    if (mainWindow) {
+      if (mainWindow.isVisible()) {
+        mainWindow.hide();
+      } else {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+    }
+  });
+}
+
 // 应用准备就绪
 app.whenReady().then(() => {
   createMainWindow();
+  createTray();
 
   // 加载并注册全局快捷键
   const shortcuts = loadShortcuts();
@@ -530,9 +701,12 @@ process.on('unhandledRejection', (reason, promise) => {
 
 // 所有窗口关闭时退出应用
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  // 在Windows和Linux上，当所有窗口关闭时不退出应用，而是隐藏到托盘
+  // 在macOS上保持原有行为
+  if (process.platform === 'darwin') {
     app.quit();
   }
+  // 其他平台不退出，应用继续在托盘中运行
 });
 // 选择保存路径
 ipcMain.handle('choose-save-path', async () => {
@@ -646,6 +820,14 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
     return { success: false, message: '正在录制中...' };
   }
 
+  // 检查FFmpeg是否可用
+  if (!checkFFmpegAvailability()) {
+    return { 
+      success: false, 
+      message: `FFmpeg不可用，请检查安装。路径: ${ffmpegPath}` 
+    };
+  }
+
   const {
     duration = 1,
     fps = 15,
@@ -663,6 +845,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
     
     isRecording = true;
     mainWindow.webContents.send('recording-started');
+    updateTrayMenu();
     const preferredDir = getSavePath();
     const saveDir = (preferredDir && fs.existsSync(preferredDir)) ? preferredDir : path.join(os.homedir(), 'Desktop');
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -749,6 +932,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
             // 直接重命名MP4文件
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
+            updateTrayMenu();
             try { currentTempFile = null; } catch (_) {}
             try { mainWindow.show(); mainWindow.focus(); } catch (_) {}
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
@@ -764,6 +948,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
                   try { fs.unlinkSync(tempFile); } catch (_) {}
                 }
                 isRecording = false;
+                updateTrayMenu();
                 try { currentTempFile = null; } catch (_) {}
                 // 录制结束后显示窗口（因为我们使用了hide而不是minimize）
                 mainWindow.show();
@@ -775,6 +960,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
               })
               .catch((err) => {
                 isRecording = false;
+                updateTrayMenu();
                 try {
                   if (currentTempFile && fs.existsSync(currentTempFile)) {
                     fs.unlinkSync(currentTempFile);
@@ -787,6 +973,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
           }
         } else {
           isRecording = false;
+          updateTrayMenu();
           try {
             if (currentTempFile && fs.existsSync(currentTempFile)) {
               fs.unlinkSync(currentTempFile);
@@ -800,6 +987,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
 
       recordingProcess.on('error', (err) => {
         isRecording = false;
+        updateTrayMenu();
         try {
           if (currentTempFile && fs.existsSync(currentTempFile)) {
             fs.unlinkSync(currentTempFile);
@@ -813,6 +1001,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
 
   } catch (error) {
     isRecording = false;
+    updateTrayMenu();
     mainWindow.webContents.send('recording-error', error.message);
     return { success: false, message: error.message };
   }
@@ -823,6 +1012,7 @@ ipcMain.handle('stop-recording', () => {
   if (recordingProcess && isRecording) {
     recordingProcess.kill('SIGTERM');
     isRecording = false;
+    updateTrayMenu();
     try {
       if (currentTempFile && fs.existsSync(currentTempFile)) {
         fs.unlinkSync(currentTempFile);
@@ -933,6 +1123,7 @@ ipcMain.handle('region-selected', async (event, region) => {
   try {
     isRecording = true;
     mainWindow.webContents.send('recording-started');
+    updateTrayMenu();
 
     const preferredDir = getSavePath();
     const saveDir = (preferredDir && fs.existsSync(preferredDir)) ? preferredDir : path.join(os.homedir(), 'Desktop');
@@ -1012,6 +1203,7 @@ ipcMain.handle('region-selected', async (event, region) => {
             // 直接重命名MP4文件
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
+            updateTrayMenu();
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
                 // 自动复制到剪贴板（保护性 try/catch）
                 try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
@@ -1025,6 +1217,7 @@ ipcMain.handle('region-selected', async (event, region) => {
                   fs.unlinkSync(tempFile);
                 }
                 isRecording = false;
+                updateTrayMenu();
                 mainWindow.show();
                 mainWindow.focus();
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
@@ -1054,6 +1247,7 @@ ipcMain.handle('region-selected', async (event, region) => {
 
   } catch (error) {
     isRecording = false;
+    updateTrayMenu();
     mainWindow.webContents.send('recording-error', error.message);
     return { success: false, message: error.message };
   }
@@ -1082,4 +1276,61 @@ ipcMain.handle('get-screen-info', () => {
     primary: screen.getPrimaryDisplay(),
     all: displays
   };
+});
+
+// 获取FFmpeg状态
+ipcMain.handle('get-ffmpeg-status', () => {
+  const isAvailable = checkFFmpegAvailability();
+  return {
+    available: isAvailable,
+    path: ffmpegPath,
+    message: isAvailable ? 'FFmpeg可用' : `FFmpeg不可用，路径: ${ffmpegPath}`,
+    debug: {
+      platform: process.platform,
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      dirname: __dirname
+    }
+  };
+});
+
+// 打开FFmpeg下载页面
+ipcMain.handle('open-ffmpeg-download', () => {
+  try {
+    shell.openExternal('https://ffmpeg.org/download.html');
+    return { success: true };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+});
+
+// 调试FFmpeg路径的IPC处理器
+ipcMain.handle('debug-ffmpeg-paths', () => {
+  const debugInfo = {
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    dirname: __dirname,
+    currentPath: ffmpegPath,
+    paths: []
+  };
+  
+  // 检查所有可能的路径
+  const possiblePaths = [
+    path.join(process.resourcesPath, 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+    path.join(__dirname, '..', 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+    path.join(__dirname, 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+    path.join(process.resourcesPath, 'app', 'node_modules', '@ffmpeg-installer', 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'),
+    path.join(__dirname, 'node_modules', '@ffmpeg-installer', 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
+  ];
+  
+  possiblePaths.forEach((testPath, index) => {
+    debugInfo.paths.push({
+      index: index + 1,
+      path: testPath,
+      exists: fs.existsSync(testPath)
+    });
+  });
+  
+  return debugInfo;
 });

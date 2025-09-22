@@ -40,9 +40,8 @@
     ],
     "extraResources": [
       {
-        "from": "node_modules/ffmpeg-static",
-        "to": "ffmpeg-static",
-        "filter": ["**/*"]
+        "from": "node_modules/@ffmpeg-installer/win32-x64",
+        "to": "ffmpeg-static"
       }
     ],
     "win": {
