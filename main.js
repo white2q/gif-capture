@@ -3,32 +3,28 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { spawn, spawnSync } = require('child_process');
-// 获取FFmpeg路径，支持开发环境和打包环境
+
+// 获取FFmpeg路径，优先使用 @ffmpeg-installer 提供的路径，并兼容 asar.unpacked
 function getFFmpegPath() {
   try {
-    // 开发环境
-    if (!app.isPackaged) {
-      return require('@ffmpeg-installer/ffmpeg').path;
+    let installerPath = require('@ffmpeg-installer/ffmpeg').path;
+    // 打包后把 app.asar 替换为 app.asar.unpacked，确保可执行文件在解压目录
+    if (app.isPackaged && typeof installerPath === 'string') {
+      installerPath = installerPath.replace('app.asar', 'app.asar.unpacked');
     }
-    
-    // 打包环境 - 主要路径
-    const mainPath = path.join(process.resourcesPath, 'ffmpeg-static', 'ffmpeg.exe');
-    if (fs.existsSync(mainPath)) {
-      return mainPath;
+    if (installerPath && fs.existsSync(installerPath)) {
+      return installerPath;
     }
-    
-    // 备用路径
-    const altPath = path.join(__dirname, '..', 'ffmpeg-static', 'ffmpeg.exe');
-    if (fs.existsSync(altPath)) {
-      return altPath;
-    }
-    
-    // 最后尝试系统PATH
-    return 'ffmpeg.exe';
-    
+
+    // 回退到 extraResources 路径（若配置了额外拷贝）
+    const resPath = path.join(process.resourcesPath || path.dirname(process.execPath), 'ffmpeg-static', process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+    if (fs.existsSync(resPath)) return resPath;
+
+    // 最后回退系统 PATH
+    return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   } catch (error) {
     console.error('获取FFmpeg路径失败:', error);
-    return 'ffmpeg.exe';
+    return process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
   }
 }
 
@@ -152,6 +148,7 @@ console.error = (...args) => {
 let mainWindow;
 let overlayWindow;
 let tray = null;
+let isQuitting = false;
 let isRecording = false;
 let recordingProcess = null;
 let registeredShortcuts = {};
@@ -524,8 +521,8 @@ function createMainWindow() {
 
   // 处理窗口关闭事件，隐藏到托盘而不是真正关闭
   mainWindow.on('close', (event) => {
-    // 在Windows和Linux上，关闭窗口时隐藏到托盘
-    if (process.platform !== 'darwin') {
+    // 在Windows和Linux上，关闭窗口时隐藏到托盘；若是用户选择退出，则允许关闭
+    if (process.platform !== 'darwin' && !isQuitting) {
       event.preventDefault();
       mainWindow.hide();
     }
@@ -610,6 +607,7 @@ function updateTrayMenu() {
       label: '退出应用',
       click: () => {
         console.log('用户点击退出应用');
+        isQuitting = true;
         // 清理资源
         try {
           if (recordingProcess) {
@@ -645,7 +643,7 @@ function updateTrayMenu() {
         }
         
         // 退出应用
-        app.quit();
+        try { app.quit(); } catch (_) {}
       }
     }
   ]);
@@ -1112,11 +1110,13 @@ ipcMain.handle('region-selected', async (event, region) => {
   
   console.log('校正后的区域坐标:', correctedRegion);
 
+  // 使用从页面获取的设置参数
+  const pageData = currentPageData || {};
   const options = {
-    duration: 1,
-    fps: 15,
-    width: 640,
-    format: 'gif',
+    duration: pageData.duration || 1,
+    fps: pageData.fps || 15,
+    width: pageData.width || 640,
+    format: pageData.format || 'gif',
     region: correctedRegion
   };
 
@@ -1266,6 +1266,13 @@ ipcMain.handle('close-region-selector', () => {
       mainWindow.focus();
     }
   } catch (_) {}
+  return { success: true };
+});
+
+// 添加获取页面数据的处理程序
+let currentPageData = {};
+ipcMain.handle('set-page-data', (event, data) => {
+  currentPageData = data;
   return { success: true };
 });
 

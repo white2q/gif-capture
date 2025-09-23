@@ -245,7 +245,7 @@
                     x: Math.min(startX, currentX),
                     y: Math.min(startY, currentY),
                     width: width,
-                    height: height
+                    height: height,
                 };
                 confirmPanel.classList.remove('hidden');
             } else {
@@ -285,7 +285,6 @@
         confirmBtn.addEventListener('click', async () => {
             if (selection) {
                 try {
-                    // 发送选择结果到主进程
                     await ipcRenderer.invoke('region-selected', selection);
                 } catch (error) {
                     console.error('发送区域选择结果失败:', error);

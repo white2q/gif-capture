@@ -32,6 +32,9 @@
     "directories": {
       "output": "dist"
     },
+    "asarUnpack": [
+      "**/node_modules/@ffmpeg-installer/**"
+    ],
     "files": [
       "**/*",
       "!node_modules/ffmpeg-static/ffmpeg.exe",

@@ -716,10 +716,44 @@
             }
         }
 
+        // 发送页面数据到主进程，供 overlay 使用
+        async function sendPageDataToOverlay() {
+            const pageData = {
+                duration: parseInt(durationInput.value),
+                fps: parseInt(fpsSelect.value),
+                width: parseInt(widthInput.value),
+                format: formatSelect.value
+            };
+            
+            try {
+                await ipcRenderer.invoke('set-page-data', pageData);
+                console.log('页面数据已发送到主进程:', pageData);
+                // 添加一个状态提示，让用户能够看到函数被调用
+                statusDiv.textContent = '设置已更新';
+                setTimeout(() => {
+                    if (statusDiv.textContent === '设置已更新') {
+                        statusDiv.textContent = '准备就绪，点击开始录制';
+                    }
+                }, 1000);
+            } catch (error) {
+                console.error('发送页面数据失败:', error);
+                updateUI('error', '设置同步失败: ' + error.message);
+            }
+        }
+
+        // 当设置更改时，自动更新发送到 overlay 的数据
+        durationInput.addEventListener('change', sendPageDataToOverlay);
+        fpsSelect.addEventListener('change', sendPageDataToOverlay);
+        widthInput.addEventListener('change', sendPageDataToOverlay);
+        formatSelect.addEventListener('change', sendPageDataToOverlay);
+
         // 初始化
         checkFFmpegStatus();
         loadAndRenderShortcuts();
         refreshSavePath();
+        
+        // 页面加载完成后发送初始数据
+        sendPageDataToOverlay();
     </script>
 </body>
 </html>
