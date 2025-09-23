@@ -385,7 +385,7 @@ function autoCopyToClipboard(filePath) {
 // 转换格式函数
 function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
   return new Promise((resolve, reject) => {
-    let convertArgs = ['-i', inputFile];
+    let convertArgs = [];
     
     if (format === 'gif') {
       // 生成调色板
@@ -452,13 +452,15 @@ function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
       });
       
     } else if (format === 'webm') {
-      convertArgs.push(
+      convertArgs = [
+        '-i', inputFile,
         '-c:v', 'libvpx-vp9',
-        '-crf', '30',
+        '-crf', '10',
         '-b:v', '0',
         '-vf', `scale=${width}:-1`,
+        '-pix_fmt', 'yuva420p',
         '-y', outputFile
-      );
+      ];
       
       console.log('转换WebM命令:', ffmpegPath, convertArgs.join(' '));
       
@@ -481,6 +483,7 @@ function convertToFormat(inputFile, outputFile, format, width, fps, duration) {
       
       convertProcess.on('close', (code) => {
         if (code === 0) {
+          console.log('WebM转换完成');
           resolve();
         } else {
           reject(new Error(`WebM转换失败，退出码: ${code}`));
@@ -887,9 +890,10 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
     }
 
     // 添加录制参数
-    recordArgs.push('-t', duration.toString());
+    recordArgs.push('-t', options.duration.toString());
     recordArgs.push('-c:v', 'libx264');
     recordArgs.push('-preset', 'ultrafast');
+    recordArgs.push('-pix_fmt', 'yuv420p');
     recordArgs.push('-crf', '18');
     recordArgs.push('-y', tempFile);
 
@@ -926,7 +930,7 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
           mainWindow.webContents.send('recording-progress', 50);
           
           // 第二步：根据格式转换
-          if (format === 'mp4') {
+          if (options.format === 'mp4') {
             // 直接重命名MP4文件
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
@@ -934,12 +938,12 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
             try { currentTempFile = null; } catch (_) {}
             try { mainWindow.show(); mainWindow.focus(); } catch (_) {}
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-            // 自动复制到剪贴板（保护性 try/catch）
-            try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
+            // 对于非GIF格式，不需要复制到剪贴板，而是直接打开保存地址
+            try { shell.showItemInFolder(outputFile); } catch (e) { console.error('打开文件位置失败:', e && e.message ? e.message : e); }
             resolve({ success: true, filePath: outputFile });
-          } else {
-            // 转换为GIF或WebM
-            convertToFormat(tempFile, outputFile, format, width, fps, duration)
+          } else if (options.format === 'webm') {
+            // 转换为WebM
+            convertToFormat(tempFile, outputFile, options.format, options.width, options.fps, options.duration)
               .then(() => {
                 // 删除临时文件
                 if (fs.existsSync(tempFile)) {
@@ -948,7 +952,38 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
                 isRecording = false;
                 updateTrayMenu();
                 try { currentTempFile = null; } catch (_) {}
-                // 录制结束后显示窗口（因为我们使用了hide而不是minimize）
+                // 录制结束后显示窗口
+                mainWindow.show();
+                mainWindow.focus();
+                mainWindow.webContents.send('recording-completed', { filePath: outputFile });
+                // 对于非GIF格式，不需要复制到剪贴板，而是直接打开保存地址
+                try { shell.showItemInFolder(outputFile); } catch (e) { console.error('打开文件位置失败:', e && e.message ? e.message : e); }
+                resolve({ success: true, filePath: outputFile });
+              })
+              .catch((err) => {
+                isRecording = false;
+                updateTrayMenu();
+                try {
+                  if (currentTempFile && fs.existsSync(currentTempFile)) {
+                    fs.unlinkSync(currentTempFile);
+                  }
+                } catch (_) {}
+                try { currentTempFile = null; } catch (_) {}
+                mainWindow.webContents.send('recording-error', err.message);
+                reject({ success: false, message: err.message });
+              });
+          } else {
+            // 转换为GIF
+            convertToFormat(tempFile, outputFile, options.format, options.width, options.fps, options.duration)
+              .then(() => {
+                // 删除临时文件
+                if (fs.existsSync(tempFile)) {
+                  try { fs.unlinkSync(tempFile); } catch (_) {}
+                }
+                isRecording = false;
+                updateTrayMenu();
+                try { currentTempFile = null; } catch (_) {}
+                // 录制结束后显示窗口
                 mainWindow.show();
                 mainWindow.focus();
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
@@ -971,13 +1006,6 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
           }
         } else {
           isRecording = false;
-          updateTrayMenu();
-          try {
-            if (currentTempFile && fs.existsSync(currentTempFile)) {
-              fs.unlinkSync(currentTempFile);
-            }
-          } catch (_) {}
-          try { currentTempFile = null; } catch (_) {}
           mainWindow.webContents.send('recording-error', `录制失败，FFmpeg 退出码: ${code}`);
           reject({ success: false, message: `录制失败，FFmpeg 退出码: ${code}` });
         }
@@ -985,13 +1013,6 @@ ipcMain.handle('start-recording', async (event, options = {}) => {
 
       recordingProcess.on('error', (err) => {
         isRecording = false;
-        updateTrayMenu();
-        try {
-          if (currentTempFile && fs.existsSync(currentTempFile)) {
-            fs.unlinkSync(currentTempFile);
-          }
-        } catch (_) {}
-        try { currentTempFile = null; } catch (_) {}
         mainWindow.webContents.send('recording-error', err.message);
         reject({ success: false, message: err.message });
       });
@@ -1108,6 +1129,14 @@ ipcMain.handle('region-selected', async (event, region) => {
     height: Math.round(region.height * scaleFactor)
   };
   
+  // 确保宽度和高度是2的倍数，以满足libx264编码器要求
+  if (correctedRegion.width % 2 !== 0) {
+    correctedRegion.width += 1;
+  }
+  if (correctedRegion.height % 2 !== 0) {
+    correctedRegion.height += 1;
+  }
+  
   console.log('校正后的区域坐标:', correctedRegion);
 
   // 使用从页面获取的设置参数
@@ -1163,6 +1192,7 @@ ipcMain.handle('region-selected', async (event, region) => {
     recordArgs.push('-t', options.duration.toString());
     recordArgs.push('-c:v', 'libx264');
     recordArgs.push('-preset', 'ultrafast');
+    recordArgs.push('-pix_fmt', 'yuv420p');
     recordArgs.push('-crf', '18');
     recordArgs.push('-y', tempFile);
 
@@ -1204,20 +1234,55 @@ ipcMain.handle('region-selected', async (event, region) => {
             fs.renameSync(tempFile, outputFile);
             isRecording = false;
             updateTrayMenu();
+            try { currentTempFile = null; } catch (_) {}
+            try { mainWindow.show(); mainWindow.focus(); } catch (_) {}
             mainWindow.webContents.send('recording-completed', { filePath: outputFile });
-                // 自动复制到剪贴板（保护性 try/catch）
-                try { autoCopyToClipboard(outputFile); } catch (e) { console.error('自动复制到剪贴板失败:', e && e.message ? e.message : e); }
+            // 对于非GIF格式，不需要复制到剪贴板，而是直接打开保存地址
+            try { shell.showItemInFolder(outputFile); } catch (e) { console.error('打开文件位置失败:', e && e.message ? e.message : e); }
             resolve({ success: true, filePath: outputFile });
-          } else {
-            // 转换为GIF或WebM
+          } else if (options.format === 'webm') {
+            // 转换为WebM
             convertToFormat(tempFile, outputFile, options.format, options.width, options.fps, options.duration)
               .then(() => {
                 // 删除临时文件
                 if (fs.existsSync(tempFile)) {
-                  fs.unlinkSync(tempFile);
+                  try { fs.unlinkSync(tempFile); } catch (_) {}
                 }
                 isRecording = false;
                 updateTrayMenu();
+                try { currentTempFile = null; } catch (_) {}
+                // 录制结束后显示窗口
+                mainWindow.show();
+                mainWindow.focus();
+                mainWindow.webContents.send('recording-completed', { filePath: outputFile });
+                // 对于非GIF格式，不需要复制到剪贴板，而是直接打开保存地址
+                try { shell.showItemInFolder(outputFile); } catch (e) { console.error('打开文件位置失败:', e && e.message ? e.message : e); }
+                resolve({ success: true, filePath: outputFile });
+              })
+              .catch((err) => {
+                isRecording = false;
+                updateTrayMenu();
+                try {
+                  if (currentTempFile && fs.existsSync(currentTempFile)) {
+                    fs.unlinkSync(currentTempFile);
+                  }
+                } catch (_) {}
+                try { currentTempFile = null; } catch (_) {}
+                mainWindow.webContents.send('recording-error', err.message);
+                reject({ success: false, message: err.message });
+              });
+          } else {
+            // 转换为GIF
+            convertToFormat(tempFile, outputFile, options.format, options.width, options.fps, options.duration)
+              .then(() => {
+                // 删除临时文件
+                if (fs.existsSync(tempFile)) {
+                  try { fs.unlinkSync(tempFile); } catch (_) {}
+                }
+                isRecording = false;
+                updateTrayMenu();
+                try { currentTempFile = null; } catch (_) {}
+                // 录制结束后显示窗口
                 mainWindow.show();
                 mainWindow.focus();
                 mainWindow.webContents.send('recording-completed', { filePath: outputFile });
@@ -1227,6 +1292,13 @@ ipcMain.handle('region-selected', async (event, region) => {
               })
               .catch((err) => {
                 isRecording = false;
+                updateTrayMenu();
+                try {
+                  if (currentTempFile && fs.existsSync(currentTempFile)) {
+                    fs.unlinkSync(currentTempFile);
+                  }
+                } catch (_) {}
+                try { currentTempFile = null; } catch (_) {}
                 mainWindow.webContents.send('recording-error', err.message);
                 reject({ success: false, message: err.message });
               });
