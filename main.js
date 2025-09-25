@@ -570,6 +570,10 @@ function createOverlayWindow() {
 function updateTrayMenu() {
   if (!tray) return;
   
+  // 检查开机自启动状态
+  const loginItemSettings = app.getLoginItemSettings();
+  const isAutoStartEnabled = loginItemSettings.openAtLogin;
+  
   const contextMenu = Menu.buildFromTemplate([
     {
       label: '显示窗口',
@@ -608,6 +612,13 @@ function updateTrayMenu() {
       }
     },
     { type: 'separator' },
+    {
+      label: isAutoStartEnabled ? '关闭开机自启动' : '开启开机自启动',
+      click: () => {
+        app.setLoginItemSettings({ openAtLogin: !isAutoStartEnabled });
+        updateTrayMenu(); // 重新构建菜单以更新标签
+      }
+    },
     {
       label: '退出应用',
       click: () => {

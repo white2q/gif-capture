@@ -27,6 +27,12 @@
     "iconv-lite": "^0.6.3"
   },
   "build": {
+    "nsis": {
+      "allowToChangeInstallationDirectory": true,
+      "oneClick": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico"
+    },
     "appId": "com.gifcapture.app",
     "productName": "GIF Capture",
     "directories": {
