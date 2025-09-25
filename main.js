@@ -512,8 +512,10 @@ function createMainWindow() {
     minWidth: 420,
     minHeight: 600,
     title: 'GIF Capture Tool',
-    icon: path.join(__dirname, 'assets/icon.png')
+    icon: path.join(__dirname, 'assets/tray-icon.png')
   });
+
+  mainWindow.setMenu( null);
 
   mainWindow.loadFile('index.html');
 
